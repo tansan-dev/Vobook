@@ -1,0 +1,7 @@
+ebooklib==0.17.1
+beautifulsoup4==4.12.2
+lxml==4.9.3
+requests==2.31.0
+jinja2==3.1.2
+azure-cognitiveservices-speech==1.31.0
+playwright==1.40.0

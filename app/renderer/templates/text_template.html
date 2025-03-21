@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }}</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: {{ background_color }};
+            font-family: {{ font_family }};
+            color: {{ text_color }};
+            overflow: hidden;
+        }
+        .container {
+            width: {{ width }}px;
+            height: {{ height }}px;
+            padding: 50px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        .content {
+            font-size: {{ font_size }};
+            line-height: {{ line_height }};
+            text-align: justify;
+            white-space: pre-line;
+        }
+        .highlight {
+            background-color: {{ highlight_color }};
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+        .chapter-title {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        {% if show_chapter_title %}
+        <h1 class="chapter-title">{{ chapter_title }}</h1>
+        {% endif %}
+        <div class="content" id="content">{{ content|safe }}</div>
+    </div>
+
+    <script>
+        // 音频时长和单词时间信息
+        const audioPath = "{{ audio_path }}";
+        const duration = {{ duration }};
+        const wordTimings = {{ word_timings|tojson }};
+        
+        // 文本内容
+        const text = "{{ content_for_js }}";
+        
+        // 标记当前朗读的位置
+        function highlightText(time) {
+            // 找到当前时间点对应的单词
+            let currentWord = null;
+            for (let i = 0; i < wordTimings.length; i++) {
+                const wordTiming = wordTimings[i];
+                const wordStart = wordTiming.audio_offset;
+                const wordEnd = wordStart + wordTiming.duration;
+                
+                if (time >= wordStart && time < wordEnd) {
+                    currentWord = wordTiming;
+                    break;
+                }
+            }
+            
+            if (currentWord) {
+                // 获取当前单词在文本中的位置
+                const phrase = currentWord.text;
+                const contentElement = document.getElementById("content");
+                const contentText = contentElement.textContent;
+                
+                // 创建带高亮的HTML
+                let html = "";
+                let lastIndex = 0;
+                
+                // 查找当前单词的所有匹配位置
+                const regex = new RegExp(phrase, "g");
+                let match;
+                let firstMatch = true;
+                
+                while ((match = regex.exec(contentText)) !== null) {
+                    // 只高亮第一个匹配项
+                    if (firstMatch) {
+                        html += contentText.substring(lastIndex, match.index);
+                        html += `<span class="highlight">${phrase}</span>`;
+                        lastIndex = match.index + phrase.length;
+                        firstMatch = false;
+                    }
+                }
+                
+                html += contentText.substring(lastIndex);
+                contentElement.innerHTML = html;
+            }
+        }
+        
+        // 计时器模拟音频播放
+        let startTime = Date.now();
+        let timer = null;
+        
+        function simulateAudioPlayback() {
+            const elapsedTime = (Date.now() - startTime) / 1000;
+            
+            if (elapsedTime <= duration) {
+                highlightText(elapsedTime);
+                timer = requestAnimationFrame(simulateAudioPlayback);
+            } else {
+                // 播放结束后，通知录制器
+                if (window.playbackComplete) {
+                    window.playbackComplete();
+                }
+            }
+        }
+        
+        // 开始模拟播放
+        window.startPlayback = function() {
+            startTime = Date.now();
+            simulateAudioPlayback();
+        };
+        
+        // 停止模拟播放
+        window.stopPlayback = function() {
+            if (timer) {
+                cancelAnimationFrame(timer);
+                timer = null;
+            }
+        };
+        
+        // 自动开始播放（可被Playwright控制）
+        setTimeout(() => {
+            if (window.autoPlay !== false) {
+                window.startPlayback();
+            }
+        }, 500);
+    </script>
+</body>
+</html>
