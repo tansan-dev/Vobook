@@ -9,7 +9,7 @@ from pathlib import Path
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from app.config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, MAX_WORKERS, TEMP_DIR
+from app.config import DEEPSEEK_API_KEY, DEEPSEEK_API_URL, MAX_WORKERS, TEMP_DIR, CACHE_DIR, CACHE_ENABLED
 
 # 设置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -26,27 +26,51 @@ class DeepSeekProcessor:
         self.api_key = DEEPSEEK_API_KEY
         self.api_url = DEEPSEEK_API_URL
         self.book_id = book_id
-        self.cache_dir = TEMP_DIR / f"{book_id}_deepseek_cache"
-        os.makedirs(self.cache_dir, exist_ok=True)
+        
+        # 使用全局缓存目录，而不是依赖book_id的临时目录
+        self.global_cache_dir = CACHE_DIR / "deepseek_cache"
+        os.makedirs(self.global_cache_dir, exist_ok=True)
+        
+        # 为了保持向后兼容，仍然创建book_id相关的缓存目录
+        self.book_cache_dir = TEMP_DIR / f"{book_id}_deepseek_cache"
+        os.makedirs(self.book_cache_dir, exist_ok=True)
     
     def _get_cache_path(self, text: str) -> Path:
         """获取缓存文件路径"""
         # 使用文本的哈希值作为缓存文件名
         text_hash = hashlib.md5(text.encode()).hexdigest()
-        return self.cache_dir / f"{text_hash}.json"
+        
+        # 优先检查全局缓存
+        global_cache_path = self.global_cache_dir / f"{text_hash}.json"
+        if global_cache_path.exists():
+            return global_cache_path
+            
+        # 然后检查书籍特定缓存
+        book_cache_path = self.book_cache_dir / f"{text_hash}.json"
+        return book_cache_path
     
     def _is_cached(self, text: str) -> bool:
-        """检查是否已缓存"""
+        """检查是否已缓存（全局或书籍特定）"""
+        if not CACHE_ENABLED:
+            return False
+            
         cache_path = self._get_cache_path(text)
         return cache_path.exists()
     
     def _get_from_cache(self, text: str) -> str:
         """从缓存获取结果"""
+        if not CACHE_ENABLED:
+            return None
+            
         cache_path = self._get_cache_path(text)
         if cache_path.exists():
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
+                
+                # 记录缓存命中日志
+                is_global = str(cache_path).startswith(str(self.global_cache_dir))
+                logger.info(f"DeepSeek缓存命中: {cache_path.name} ({'全局' if is_global else '书籍特定'}缓存)")
                 return data.get('result', text)
             except Exception as e:
                 logger.error(f"读取缓存失败: {e}")
@@ -54,14 +78,33 @@ class DeepSeekProcessor:
     
     def _save_to_cache(self, text: str, result: str) -> None:
         """保存结果到缓存"""
-        cache_path = self._get_cache_path(text)
+        if not CACHE_ENABLED:
+            return
+            
+        # 使用文本的哈希值作为缓存文件名
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        
+        # 同时保存到全局缓存和书籍特定缓存
+        global_cache_path = self.global_cache_dir / f"{text_hash}.json"
+        book_cache_path = self.book_cache_dir / f"{text_hash}.json"
+        
+        cache_data = {
+            'original': text,
+            'result': result,
+            'timestamp': time.time(),
+            'book_id': self.book_id  # 记录来源书籍ID，便于管理
+        }
+        
         try:
-            with open(cache_path, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'original': text,
-                    'result': result,
-                    'timestamp': time.time()
-                }, f, ensure_ascii=False)
+            # 保存到全局缓存
+            with open(global_cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False)
+                
+            # 保存到书籍特定缓存
+            with open(book_cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False)
+                
+            logger.info(f"DeepSeek结果已缓存: {text_hash}")
         except Exception as e:
             logger.error(f"保存缓存失败: {e}")
     

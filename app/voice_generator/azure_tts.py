@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Tuple
 import logging
 import azure.cognitiveservices.speech as speechsdk
 from concurrent.futures import ThreadPoolExecutor
+import shutil
 
 from app.config import (
     AZURE_SPEECH_KEY, 
@@ -16,7 +17,9 @@ from app.config import (
     AZURE_SPEECH_RATE,
     AZURE_SPEECH_PITCH,
     MAX_WORKERS,
-    TEMP_DIR
+    TEMP_DIR,
+    CACHE_DIR,
+    CACHE_ENABLED
 )
 
 # 设置日志
@@ -38,8 +41,14 @@ class AzureTTS:
         self.speech_pitch = AZURE_SPEECH_PITCH
         
         self.book_id = book_id
-        self.audio_dir = TEMP_DIR / f"{book_id}_audio"
-        os.makedirs(self.audio_dir, exist_ok=True)
+        
+        # 全局TTS缓存目录
+        self.global_audio_cache = CACHE_DIR / "tts_cache"
+        os.makedirs(self.global_audio_cache, exist_ok=True)
+        
+        # 书籍特定的音频目录
+        self.book_audio_dir = TEMP_DIR / f"{book_id}_audio"
+        os.makedirs(self.book_audio_dir, exist_ok=True)
         
         # 初始化Azure语音配置
         if self.speech_key:
@@ -52,19 +61,119 @@ class AzureTTS:
             self.speech_config = None
             logger.warning("未提供Azure Speech密钥，TTS功能将不可用")
     
-    def _get_audio_path(self, paragraph_id: str) -> Path:
+    def _get_audio_path(self, paragraph_id: str, content_hash: str = None) -> Path:
         """获取音频文件路径"""
-        return self.audio_dir / f"{paragraph_id}.mp3"
+        if content_hash:
+            return self.book_audio_dir / f"{content_hash}.mp3"
+        else:
+            return self.book_audio_dir / f"{paragraph_id}.mp3"
     
-    def _get_metadata_path(self, paragraph_id: str) -> Path:
+    def _get_metadata_path(self, paragraph_id: str, content_hash: str = None) -> Path:
         """获取元数据文件路径"""
-        return self.audio_dir / f"{paragraph_id}.json"
+        if content_hash:
+            return self.book_audio_dir / f"{content_hash}.json"
+        else:
+            return self.book_audio_dir / f"{paragraph_id}.json"
     
-    def _is_generated(self, paragraph_id: str) -> bool:
+    def _get_global_audio_path(self, content_hash: str) -> Path:
+        """获取全局缓存中的音频路径"""
+        return self.global_audio_cache / f"{content_hash}.mp3"
+    
+    def _get_global_metadata_path(self, content_hash: str) -> Path:
+        """获取全局缓存中的元数据路径"""
+        return self.global_audio_cache / f"{content_hash}.json"
+    
+    def _is_in_global_cache(self, content_hash: str) -> bool:
+        """检查是否在全局缓存中"""
+        if not CACHE_ENABLED:
+            return False
+            
+        audio_path = self._get_global_audio_path(content_hash)
+        meta_path = self._get_global_metadata_path(content_hash)
+        return audio_path.exists() and meta_path.exists()
+    
+    def _is_generated(self, paragraph_id: str, content: str = None) -> bool:
         """检查是否已生成音频文件"""
-        audio_path = self._get_audio_path(paragraph_id)
-        metadata_path = self._get_metadata_path(paragraph_id)
-        return audio_path.exists() and metadata_path.exists()
+        if not CACHE_ENABLED:
+            return False
+            
+        # 如果提供了内容，使用内容哈希查找
+        if content:
+            content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+            
+            # 先检查全局缓存
+            if self._is_in_global_cache(content_hash):
+                return True
+                
+            # 再检查书籍特定缓存
+            audio_path = self._get_audio_path(paragraph_id, content_hash)
+            metadata_path = self._get_metadata_path(paragraph_id, content_hash)
+            return audio_path.exists() and metadata_path.exists()
+        else:
+            # 使用段落ID查找
+            audio_path = self._get_audio_path(paragraph_id)
+            metadata_path = self._get_metadata_path(paragraph_id)
+            return audio_path.exists() and metadata_path.exists()
+    
+    def _copy_from_global_cache(self, content: str, paragraph_id: str) -> Dict[str, Any]:
+        """从全局缓存复制到书籍特定目录"""
+        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+        
+        # 全局缓存路径
+        global_audio = self._get_global_audio_path(content_hash)
+        global_meta = self._get_global_metadata_path(content_hash)
+        
+        # 书籍特定路径
+        book_audio = self._get_audio_path(paragraph_id, content_hash)
+        book_meta = self._get_metadata_path(paragraph_id, content_hash)
+        
+        # 复制音频文件
+        shutil.copy2(global_audio, book_audio)
+        
+        # 读取并保存元数据
+        with open(global_meta, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        
+        # 更新元数据中的一些信息
+        metadata['copied_from_global'] = True
+        metadata['copy_time'] = time.time()
+        
+        # 保存到书籍特定目录
+        with open(book_meta, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False)
+        
+        logger.info(f"从全局缓存复制TTS结果: {paragraph_id} - {content_hash}")
+        
+        return {
+            "audio_path": str(book_audio),
+            "duration": metadata["duration"],
+            "word_timings": metadata["word_timings"]
+        }
+    
+    def _save_to_global_cache(self, content: str, audio_path: Path, metadata: Dict) -> None:
+        """保存结果到全局缓存"""
+        if not CACHE_ENABLED:
+            return
+            
+        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+        
+        # 全局缓存路径
+        global_audio = self._get_global_audio_path(content_hash)
+        global_meta = self._get_global_metadata_path(content_hash)
+        
+        # 复制音频文件
+        shutil.copy2(audio_path, global_audio)
+        
+        # 更新元数据中的一些信息
+        metadata['saved_to_global'] = True
+        metadata['save_time'] = time.time()
+        metadata['book_id'] = self.book_id
+        
+        # 保存元数据
+        with open(global_meta, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False)
+            
+        logger.info(f"TTS结果已保存到全局缓存: {content_hash}")
     
     def _generate_empty_audio(self, paragraph_id: str, duration: float = 5.0) -> Dict[str, Any]:
         """为图片等创建空白音频和元数据"""
@@ -101,15 +210,39 @@ class AzureTTS:
         if paragraph["type"] == "image":
             return self._generate_empty_audio(paragraph_id)
         
-        # 检查是否已生成
-        if self._is_generated(paragraph_id):
+        # 要合成的文本
+        text = paragraph["content"]
+        if not text.strip():
+            return self._generate_empty_audio(paragraph_id, 1.0)
+        
+        # 计算内容哈希
+        content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        
+        # 检查全局缓存
+        if self._is_in_global_cache(content_hash):
+            logger.info(f"TTS全局缓存命中: {paragraph_id}")
+            return self._copy_from_global_cache(text, paragraph_id)
+            
+        # 检查书籍特定缓存
+        if self._is_generated(paragraph_id, text):
             # 读取元数据
-            metadata_path = self._get_metadata_path(paragraph_id)
+            metadata_path = self._get_metadata_path(paragraph_id, content_hash)
+            if not metadata_path.exists():
+                metadata_path = self._get_metadata_path(paragraph_id)
+                
             with open(metadata_path, 'r', encoding='utf-8') as f:
                 metadata = json.load(f)
             
+            # 获取对应的音频路径
+            if os.path.exists(self._get_audio_path(paragraph_id, content_hash)):
+                audio_path = self._get_audio_path(paragraph_id, content_hash)
+            else:
+                audio_path = self._get_audio_path(paragraph_id)
+                
+            logger.info(f"TTS书籍缓存命中: {paragraph_id}")
+            
             return {
-                "audio_path": str(self._get_audio_path(paragraph_id)),
+                "audio_path": str(audio_path),
                 "duration": metadata["duration"],
                 "word_timings": metadata["word_timings"]
             }
@@ -119,13 +252,8 @@ class AzureTTS:
             logger.warning(f"未配置Azure语音服务，为段落 {paragraph_id} 创建空白音频")
             return self._generate_empty_audio(paragraph_id, 1.0)
         
-        # 要合成的文本
-        text = paragraph["content"]
-        if not text.strip():
-            return self._generate_empty_audio(paragraph_id, 1.0)
-        
         # 设置输出格式和路径
-        audio_path = self._get_audio_path(paragraph_id)
+        audio_path = self._get_audio_path(paragraph_id, content_hash)
         audio_config = speechsdk.audio.AudioOutputConfig(filename=str(audio_path))
         
         # 构建SSML
@@ -194,11 +322,16 @@ class AzureTTS:
                 metadata = {
                     "duration": duration,
                     "word_timings": word_timings,
-                    "created_at": time.time()
+                    "created_at": time.time(),
+                    "content_hash": content_hash
                 }
                 
-                with open(self._get_metadata_path(paragraph_id), 'w', encoding='utf-8') as f:
+                # 保存到书籍特定缓存
+                with open(self._get_metadata_path(paragraph_id, content_hash), 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, ensure_ascii=False)
+                
+                # 保存到全局缓存
+                self._save_to_global_cache(text, audio_path, metadata)
                 
                 return {
                     "audio_path": str(audio_path),

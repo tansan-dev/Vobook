@@ -10,11 +10,18 @@ DATA_DIR = BASE_DIR / "data"
 INPUT_DIR = DATA_DIR / "inputs"
 TEMP_DIR = DATA_DIR / "temp"
 OUTPUT_DIR = DATA_DIR / "outputs"
+CACHE_DIR = DATA_DIR / "cache"
 
 # 确保目录存在
 os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# 缓存配置
+CACHE_ENABLED = True  # 默认启用缓存
+CACHE_MAX_AGE = 30  # 缓存最大保留天数
+CACHE_INDEX_FILE = TEMP_DIR / "book_cache_index.json"
 
 # DeepSeek API 配置
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")

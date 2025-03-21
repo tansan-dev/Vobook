@@ -6,6 +6,7 @@ import os
 import re
 import uuid
 import json
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional, Set
 from app.config import TEMP_DIR
@@ -23,17 +24,51 @@ class EpubParser:
         self.book = epub.read_epub(epub_path)
         self.title = self.book.get_metadata('DC', 'title')[0][0] if self.book.get_metadata('DC', 'title') else "未知标题"
         self.author = self.book.get_metadata('DC', 'creator')[0][0] if self.book.get_metadata('DC', 'creator') else "未知作者"
-        self.book_id = str(uuid.uuid4())[:8]
+        
+        # 生成一个基于epub路径和内容的稳定ID，而不是随机UUID
+        hash_input = f"{os.path.basename(epub_path)}_{self.title}_{self.author}"
+        self.book_id = hashlib.md5(hash_input.encode('utf-8')).hexdigest()[:8]
+
         self.book_dir = TEMP_DIR / f"{self.book_id}_{self.title}"
         self.images_dir = self.book_dir / "images"
         os.makedirs(self.book_dir, exist_ok=True)
         os.makedirs(self.images_dir, exist_ok=True)
         
+        # 保存书籍信息到缓存索引
+        self._save_to_cache_index()
+        
         # 解析目录结构
         self.toc_parser = TocParser(self.book)
         self.toc_items = self.toc_parser.parse_toc()
         self.flat_toc = self.toc_parser.flatten_toc(self.toc_items)
+    
+    def _save_to_cache_index(self):
+        """保存书籍ID到缓存索引，便于日后查找"""
+        index_path = TEMP_DIR / "book_cache_index.json"
+        index = {}
         
+        # 读取现有索引(如果存在)
+        if os.path.exists(index_path):
+            try:
+                with open(index_path, 'r', encoding='utf-8') as f:
+                    index = json.load(f)
+            except:
+                # 如果文件损坏，创建新索引
+                index = {}
+        
+        # 添加或更新当前书籍的缓存信息
+        index[self.epub_path] = {
+            "book_id": self.book_id,
+            "title": self.title,
+            "author": self.author,
+            "last_accessed": os.path.getmtime(self.epub_path),
+            "cache_dir": str(self.book_dir)
+        }
+        
+        # 保存索引
+        with open(index_path, 'w', encoding='utf-8') as f:
+            json.dump(index, f, ensure_ascii=False, indent=2)
+    
     def get_book_info(self) -> Dict[str, Any]:
         """获取电子书基本信息"""
         return {
@@ -264,8 +299,10 @@ class EpubParser:
                             img_path = path
                             break
                     
+                    # 使用稳定的ID基于图片路径
+                    img_id = f"p_img_{hashlib.md5(img_path.encode('utf-8')).hexdigest()[:8]}"
                     paragraphs.append({
-                        "id": f"p_{idx}",
+                        "id": img_id,
                         "type": "image",
                         "content": "",
                         "image_path": img_path
@@ -287,15 +324,19 @@ class EpubParser:
                                         img_path = path
                                         break
                                 
+                                # 使用稳定的ID基于图片路径
+                                img_id = f"p_img_{hashlib.md5(img_path.encode('utf-8')).hexdigest()[:8]}"
                                 paragraphs.append({
-                                    "id": f"p_{idx}_img",
+                                    "id": img_id,
                                     "type": "image",
                                     "content": "",
                                     "image_path": img_path
                                 })
                     
+                    # 使用稳定的ID基于文本内容
+                    para_id = f"p_{hashlib.md5(text.encode('utf-8')).hexdigest()[:8]}"
                     paragraphs.append({
-                        "id": f"p_{idx}",
+                        "id": para_id,
                         "type": "text",
                         "content": text,
                         "image_path": None

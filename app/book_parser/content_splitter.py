@@ -1,6 +1,7 @@
 # app/book_parser/content_splitter.py
 from typing import List, Dict, Any
 import re
+import hashlib
 
 class ContentSplitter:
     def __init__(self, max_chars_per_segment: int = 500):
@@ -35,8 +36,10 @@ class ContentSplitter:
             else:
                 # 否则创建新段落
                 if current_segment:
+                    # 使用内容哈希创建稳定ID
+                    content_hash = hashlib.md5(current_segment.encode('utf-8')).hexdigest()[:8]
                     segments.append({
-                        "id": f"{paragraph['id']}_{len(segments)}",
+                        "id": f"{paragraph['id']}_{content_hash}",
                         "type": "text",
                         "content": current_segment.strip(),
                         "image_path": None
@@ -45,8 +48,10 @@ class ContentSplitter:
         
         # 添加最后一个段落
         if current_segment:
+            # 使用内容哈希创建稳定ID
+            content_hash = hashlib.md5(current_segment.encode('utf-8')).hexdigest()[:8]
             segments.append({
-                "id": f"{paragraph['id']}_{len(segments)}",
+                "id": f"{paragraph['id']}_{content_hash}",
                 "type": "text",
                 "content": current_segment.strip(),
                 "image_path": None
