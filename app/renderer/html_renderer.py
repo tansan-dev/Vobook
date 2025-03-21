@@ -112,93 +112,6 @@ class HtmlRenderer:
         const audioPath = "{{ audio_path }}";
         const duration = {{ duration }};
         const wordTimings = {{ word_timings|tojson }};
-        
-        // 文本内容
-        const text = "{{ content_for_js }}";
-        
-        // 标记当前朗读的位置
-        function highlightText(time) {
-            // 找到当前时间点对应的单词
-            let currentWord = null;
-            for (let i = 0; i < wordTimings.length; i++) {
-                const wordTiming = wordTimings[i];
-                const wordStart = wordTiming.audio_offset;
-                const wordEnd = wordStart + wordTiming.duration;
-                
-                if (time >= wordStart && time < wordEnd) {
-                    currentWord = wordTiming;
-                    break;
-                }
-            }
-            
-            if (currentWord) {
-                // 获取当前单词在文本中的位置
-                const phrase = currentWord.text;
-                const contentElement = document.getElementById("content");
-                const contentText = contentElement.textContent;
-                
-                // 创建带高亮的HTML
-                let html = "";
-                let lastIndex = 0;
-                
-                // 查找当前单词的所有匹配位置
-                const regex = new RegExp(phrase, "g");
-                let match;
-                let firstMatch = true;
-                
-                while ((match = regex.exec(contentText)) !== null) {
-                    // 只高亮第一个匹配项
-                    if (firstMatch) {
-                        html += contentText.substring(lastIndex, match.index);
-                        html += `<span class="highlight">${phrase}</span>`;
-                        lastIndex = match.index + phrase.length;
-                        firstMatch = false;
-                    }
-                }
-                
-                html += contentText.substring(lastIndex);
-                contentElement.innerHTML = html;
-            }
-        }
-        
-        // 计时器模拟音频播放
-        let startTime = Date.now();
-        let timer = null;
-        
-        function simulateAudioPlayback() {
-            const elapsedTime = (Date.now() - startTime) / 1000;
-            
-            if (elapsedTime <= duration) {
-                highlightText(elapsedTime);
-                timer = requestAnimationFrame(simulateAudioPlayback);
-            } else {
-                // 播放结束后，通知录制器
-                if (window.playbackComplete) {
-                    window.playbackComplete();
-                }
-            }
-        }
-        
-        // 开始模拟播放
-        window.startPlayback = function() {
-            startTime = Date.now();
-            simulateAudioPlayback();
-        };
-        
-        // 停止模拟播放
-        window.stopPlayback = function() {
-            if (timer) {
-                cancelAnimationFrame(timer);
-                timer = null;
-            }
-        };
-        
-        // 自动开始播放（可被Playwright控制）
-        setTimeout(() => {
-            if (window.autoPlay !== false) {
-                window.startPlayback();
-            }
-        }, 500);
     </script>
 </body>
 </html>"""
@@ -258,44 +171,6 @@ class HtmlRenderer:
         // 音频时长
         const audioPath = "{{ audio_path }}";
         const duration = {{ duration }};
-        
-        // 计时器模拟音频播放
-        let startTime = Date.now();
-        let timer = null;
-        
-        function simulateAudioPlayback() {
-            const elapsedTime = (Date.now() - startTime) / 1000;
-            
-            if (elapsedTime <= duration) {
-                timer = requestAnimationFrame(simulateAudioPlayback);
-            } else {
-                // 播放结束后，通知录制器
-                if (window.playbackComplete) {
-                    window.playbackComplete();
-                }
-            }
-        }
-        
-        // 开始模拟播放
-        window.startPlayback = function() {
-            startTime = Date.now();
-            simulateAudioPlayback();
-        };
-        
-        // 停止模拟播放
-        window.stopPlayback = function() {
-            if (timer) {
-                cancelAnimationFrame(timer);
-                timer = null;
-            }
-        };
-        
-        // 自动开始播放（可被Playwright控制）
-        setTimeout(() => {
-            if (window.autoPlay !== false) {
-                window.startPlayback();
-            }
-        }, 500);
     </script>
 </body>
 </html>"""

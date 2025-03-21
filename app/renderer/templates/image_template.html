@@ -54,9 +54,14 @@
         let timer = null;
         
         function simulateAudioPlayback() {
+            // 使用speedFactor调整播放速度
+            const speedFactor = window.speedFactor || 1.0;
             const elapsedTime = (Date.now() - startTime) / 1000;
             
-            if (elapsedTime <= duration) {
+            // 使用speedFactor调整实际时间
+            const adjustedTime = elapsedTime * speedFactor;
+            
+            if (adjustedTime <= duration) {
                 timer = requestAnimationFrame(simulateAudioPlayback);
             } else {
                 // 播放结束后，通知录制器

@@ -47,7 +47,7 @@ VIDEO_WIDTH = 1920 # 视频宽度
 VIDEO_HEIGHT = 1080  # 视频高度
 VIDEO_FPS = 30  # 视频帧率
 VIDEO_FORMAT = "mp4"  # 视频格式
-SPEED_FACTOR = 2.0  # 录制加速倍率
+SPEED_FACTOR = 1.0  # 录制速度因子 - 修改为1.0正常速度
 
 # 插图处理
 IMAGE_DISPLAY_TIME = 5  # 插图显示时间（秒）

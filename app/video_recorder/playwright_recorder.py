@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 import json
 import subprocess
+import time
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from playwright.async_api import async_playwright
@@ -40,9 +42,72 @@ class PlaywrightRecorder:
         """获取视频文件路径"""
         return self.video_dir / f"{paragraph_id}.mp4"
     
-    def _get_temp_video_path(self, paragraph_id: str) -> Path:
-        """获取临时视频文件路径（加速版）"""
-        return self.video_dir / f"{paragraph_id}_temp.mp4"
+    def _get_frames_dir(self, paragraph_id: str) -> Path:
+        """获取帧图像目录"""
+        frames_dir = self.video_dir / f"{paragraph_id}_frames"
+        os.makedirs(frames_dir, exist_ok=True)
+        return frames_dir
+    
+    async def capture_frames(self, page, duration, frames_dir, fps=VIDEO_FPS):
+        """按指定的帧率捕获页面截图"""
+        total_frames = int(duration * fps)
+        frame_interval = 1.0 / fps
+        
+        logger.info(f"开始截图，总帧数: {total_frames}, 间隔: {frame_interval}秒")
+        
+        for frame_index in range(total_frames):
+            frame_time = frame_index * frame_interval
+            
+            # 计算当前时间进度并设置到页面中
+            await page.evaluate(f"window.updatePlaybackTime({frame_time})")
+            
+            # 截图并保存
+            frame_path = os.path.join(frames_dir, f"frame_{frame_index:06d}.png")
+            await page.screenshot(path=frame_path, type='png')
+            
+            # 等待直到下一帧的时间
+            if frame_index < total_frames - 1:
+                # 使用精确定时
+                await asyncio.sleep(frame_interval * 0.8)  # 略微加快截图速度，避免延迟
+        
+        logger.info(f"截图完成，共 {total_frames} 帧")
+        return total_frames
+    
+    def frames_to_video(self, frames_dir, output_path, fps=VIDEO_FPS):
+        """将帧图像合成为视频"""
+        try:
+            frame_pattern = os.path.join(frames_dir, "frame_%06d.png")
+            
+            # 使用ffmpeg将帧序列转换为视频
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-framerate", str(fps),
+                "-i", frame_pattern,
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-r", str(fps),
+                "-preset", "medium",
+                "-crf", "23",
+                output_path
+            ]
+            
+            logger.info(f"开始合成视频: {' '.join(ffmpeg_cmd)}")
+            
+            process = subprocess.run(
+                ffmpeg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            if process.returncode != 0:
+                logger.error(f"视频合成失败: {process.stderr.decode()}")
+                return False
+            
+            logger.info(f"视频合成成功: {output_path}")
+            return True
+        except Exception as e:
+            logger.error(f"视频合成异常: {e}")
+            return False
     
     async def record_paragraph(self, paragraph: Dict[str, Any]) -> str:
         """录制单个段落的视频"""
@@ -57,36 +122,24 @@ class PlaywrightRecorder:
         
         # 视频输出路径
         video_path = self._get_video_path(paragraph_id)
-        temp_video_path = self._get_temp_video_path(paragraph_id)
         
         # 如果视频已存在，直接返回
         if video_path.exists():
             logger.info(f"视频已存在，跳过录制: {video_path}")
             return str(video_path)
         
+        # 帧图像目录
+        frames_dir = self._get_frames_dir(paragraph_id)
+        
         try:
-            # 创建临时视频路径
-            video_path_tmp = tempfile.mktemp(suffix=".webm")
-            video_dir_tmp = os.path.dirname(video_path_tmp)
-            
             # 启动Playwright
             async with async_playwright() as p:
                 # 启动浏览器
                 browser = await p.chromium.launch(headless=True)
                 
-                # 创建上下文，在这里配置视频录制
+                # 创建上下文
                 context = await browser.new_context(
-                    viewport={"width": VIDEO_WIDTH, "height": VIDEO_HEIGHT},
-                    record_video_dir=video_dir_tmp,
-                    record_video_size={"width": VIDEO_WIDTH, "height": VIDEO_HEIGHT}
-                )
-                
-                # 开始跟踪（可选）
-                await context.tracing.start(
-                    screenshots=True,
-                    snapshots=True,
-                    sources=False,
-                    title="Audiobook Recording"
+                    viewport={"width": VIDEO_WIDTH, "height": VIDEO_HEIGHT}
                 )
                 
                 # 创建页面
@@ -96,138 +149,166 @@ class PlaywrightRecorder:
                 file_url = f"file://{html_path}"
                 await page.goto(file_url)
                 
-                # 注入控制脚本
-                await page.evaluate(f"""
-                    window.autoPlay = true;
-                    window.speedFactor = {SPEED_FACTOR};
+                # 准备word_timings数据
+                word_timings = paragraph.get("word_timings", [])
                 
-                    // 创建完成Promise
-                    let playbackCompleteResolve;
-                    window.playbackCompletePromise = new Promise(resolve => {{
-                        playbackCompleteResolve = resolve;
-                    }});
+                # 优化word_timings，合并短小分段为句子级别
+                optimized_timings = self._optimize_word_timings(word_timings, paragraph.get("content", ""))
+                
+                # 注入控制脚本 - 使用优化后的timings
+                await page.evaluate(f"""
+                    // 设置全局变量
+                    window.duration = {duration};
+                    window.currentTime = 0;
                     
-                    window.playbackComplete = function() {{
-                        if (playbackCompleteResolve) {{
-                            playbackCompleteResolve();
-                        }}
+                    // 更新播放时间的函数
+                    window.updatePlaybackTime = function(time) {{
+                        window.currentTime = time;
+                        highlightTextAtTime(time);
                     }};
+                    
+                    // 高亮函数 - 优化版本
+                    function highlightTextAtTime(time) {{
+                        // 获取优化后的timings和内容元素
+                        const wordTimings = {json.dumps(optimized_timings)};
+                        const contentElement = document.getElementById("content");
+                        
+                        if (!contentElement || !wordTimings || wordTimings.length === 0) {{
+                            return;
+                        }}
+                        
+                        // 找到当前时间点对应的文本片段
+                        let currentSegment = null;
+                        for (let i = 0; i < wordTimings.length; i++) {{
+                            const timing = wordTimings[i];
+                            const segmentStart = timing.audio_offset;
+                            const segmentEnd = segmentStart + timing.duration;
+                            
+                            if (time >= segmentStart && time < segmentEnd) {{
+                                currentSegment = timing;
+                                break;
+                            }}
+                        }}
+                        
+                        if (currentSegment) {{
+                            const phrase = currentSegment.text;
+                            const contentText = contentElement.textContent;
+                            
+                            // 创建带高亮的HTML
+                            let html = "";
+                            let lastIndex = 0;
+                            
+                            // 使用更精确的方法定位文本
+                            const segmentIndex = contentText.indexOf(phrase);
+                            if (segmentIndex >= 0) {{
+                                html = contentText.substring(0, segmentIndex);
+                                html += `<span class="highlight">${{phrase}}</span>`;
+                                html += contentText.substring(segmentIndex + phrase.length);
+                                contentElement.innerHTML = html;
+                            }}
+                        }}
+                    }}
                 """)
                 
-                # 开始播放
-                await page.evaluate("window.startPlayback();")
+                # 添加启动延迟，确保页面完全加载
+                await asyncio.sleep(0.5)
                 
-                # 等待播放完成
-                try:
-                    # 计算加速后的等待时间（加上安全边际）
-                    accelerated_duration = duration / SPEED_FACTOR + 1.0
-                    
-                    # 设置超时
-                    wait_task = asyncio.create_task(
-                        page.evaluate("window.playbackCompletePromise")
-                    )
-                    
-                    # 等待播放完成或超时
-                    await asyncio.wait_for(wait_task, timeout=accelerated_duration)
-                except asyncio.TimeoutError:
-                    logger.warning(f"播放超时，强制结束: {paragraph_id}")
+                # 按帧率捕获页面截图
+                await self.capture_frames(page, duration, frames_dir)
                 
-                # 获取视频路径 - 正确的方式
-                recorded_video_path = None
-                try:
-                    # 注意：在某些版本中，需要访问page.video，然后调用await video.path()
-                    recorded_video_path = await page.video.path()
-                except Exception as e:
-                    logger.warning(f"获取视频路径失败: {e}")
-                    
-                # 停止跟踪
-                await context.tracing.stop(path=f"{self.video_dir}/trace_{paragraph_id}.zip")
-                
-                # 关闭上下文和浏览器 
-                await context.close()
+                # 关闭浏览器
                 await browser.close()
+            
+            # 将帧图像合成为视频
+            if self.frames_to_video(frames_dir, str(video_path)):
+                logger.info(f"视频录制成功: {video_path}")
                 
-                # 处理录制的视频
-                if recorded_video_path and os.path.exists(recorded_video_path):
-                    # 使用ffmpeg处理视频，减速至原始速度
-                    speed_factor_inverse = 1.0 / SPEED_FACTOR
-                    logger.info(f"正在处理视频，减速至原始速度: {speed_factor_inverse}")
-                    
-                    ffmpeg_cmd = [
-                        "ffmpeg", "-y",
-                        "-i", recorded_video_path,
-                        "-filter:v", f"setpts={speed_factor_inverse}*PTS",
-                        "-c:v", "libx264",
-                        "-preset", "medium",
-                        "-crf", "23",
-                        str(video_path)
-                    ]
-                    
-                    process = subprocess.run(
-                        ffmpeg_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    
-                    if process.returncode != 0:
-                        logger.error(f"视频处理失败: {process.stderr.decode()}")
-                        return ""
-                    
-                    # 清理临时文件
-                    try:
-                        os.remove(recorded_video_path)
-                    except:
-                        pass
-                    
-                    logger.info(f"视频录制成功: {video_path}")
-                    return str(video_path)
-                else:
-                    # 如果没有获取到视频路径，尝试从目录中查找
-                    video_files = [f for f in os.listdir(video_dir_tmp) 
-                                if f.endswith('.webm') and os.path.isfile(os.path.join(video_dir_tmp, f))]
-                    
-                    if video_files:
-                        recorded_video = os.path.join(video_dir_tmp, video_files[0])
-                        
-                        # 使用ffmpeg处理视频
-                        speed_factor_inverse = 1.0 / SPEED_FACTOR
-                        logger.info(f"正在处理查找到的视频，减速至原始速度: {speed_factor_inverse}")
-                        
-                        ffmpeg_cmd = [
-                            "ffmpeg", "-y",
-                            "-i", recorded_video,
-                            "-filter:v", f"setpts={speed_factor_inverse}*PTS",
-                            "-c:v", "libx264",
-                            "-preset", "medium",
-                            "-crf", "23",
-                            str(video_path)
-                        ]
-                        
-                        process = subprocess.run(
-                            ffmpeg_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE
-                        )
-                        
-                        if process.returncode != 0:
-                            logger.error(f"视频处理失败: {process.stderr.decode()}")
-                            return ""
-                        
-                        # 清理临时文件
-                        try:
-                            os.remove(recorded_video)
-                        except:
-                            pass
-                        
-                        logger.info(f"视频录制成功: {video_path}")
-                        return str(video_path)
-                    else:
-                        logger.error("未找到录制的视频文件")
-                        return ""
-        
+                # 保留帧目录用于调试
+                # shutil.rmtree(frames_dir)
+                
+                return str(video_path)
+            else:
+                logger.error(f"视频合成失败: {paragraph_id}")
+                return ""
+            
         except Exception as e:
             logger.error(f"视频录制失败: {e}")
             return ""
+    
+    def _optimize_word_timings(self, word_timings, content):
+        """优化word_timings，合并为更有意义的文本段落"""
+        if not word_timings:
+            return []
+            
+        # 如果内容很短，直接返回完整内容的timing
+        if len(content) < 50 and len(word_timings) > 0:
+            first_timing = word_timings[0]
+            last_timing = word_timings[-1]
+            total_duration = (last_timing['audio_offset'] + last_timing['duration']) - first_timing['audio_offset']
+            
+            return [{
+                'text': content,
+                'audio_offset': first_timing['audio_offset'],
+                'duration': total_duration
+            }]
+        
+        # 按中文句子分隔符合并
+        sentence_markers = ['。', '！', '？', '；', '，', '.', '!', '?', ';', ',']
+        result = []
+        
+        current_sentence = ''
+        sentence_start_time = 0
+        sentence_duration = 0
+        
+        for i, timing in enumerate(word_timings):
+            text = timing['text']
+            current_sentence += text
+            
+            # 如果是第一个词，记录开始时间
+            if i == 0 or not current_sentence:
+                sentence_start_time = timing['audio_offset']
+            
+            # 检查是否应该结束当前句子
+            is_end_of_sentence = False
+            
+            # 检查是否包含句末标点
+            if any(marker in text for marker in sentence_markers):
+                is_end_of_sentence = True
+            
+            # 最后一个词
+            if i == len(word_timings) - 1:
+                is_end_of_sentence = True
+            
+            # 如果已经积累了足够长的片段
+            if len(current_sentence) > 15:
+                is_end_of_sentence = True
+            
+            # 如果应该结束当前句子
+            if is_end_of_sentence and current_sentence:
+                end_time = timing['audio_offset'] + timing['duration']
+                sentence_duration = end_time - sentence_start_time
+                
+                result.append({
+                    'text': current_sentence,
+                    'audio_offset': sentence_start_time,
+                    'duration': sentence_duration
+                })
+                
+                current_sentence = ''
+        
+        # 处理可能剩余的片段
+        if current_sentence and word_timings:
+            last_timing = word_timings[-1]
+            end_time = last_timing['audio_offset'] + last_timing['duration']
+            sentence_duration = end_time - sentence_start_time
+            
+            result.append({
+                'text': current_sentence,
+                'audio_offset': sentence_start_time,
+                'duration': sentence_duration
+            })
+        
+        return result
     
     async def record_paragraphs(self, paragraphs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """录制多个段落"""
