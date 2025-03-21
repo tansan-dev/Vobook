@@ -152,10 +152,23 @@ class AzureTTS:
         def word_boundary_callback(evt):
             """处理单词边界事件"""
             nonlocal word_timings
+            
+            # 处理audio_offset - 可能是整数微秒或timedelta对象
+            if isinstance(evt.audio_offset, int):
+                audio_offset = evt.audio_offset / 10000000  # 将微秒转换为秒
+            else:  # 假设是timedelta对象
+                audio_offset = evt.audio_offset.total_seconds()
+            
+            # 处理duration - 可能是整数微秒或timedelta对象
+            if isinstance(evt.duration, int):
+                duration = evt.duration / 10000000  # 将微秒转换为秒
+            else:  # 假设是timedelta对象
+                duration = evt.duration.total_seconds()
+            
             word_timings.append({
                 "text": evt.text,
-                "audio_offset": evt.audio_offset / 10000000,  # 转换为秒
-                "duration": evt.duration / 10000000  # 转换为秒
+                "audio_offset": audio_offset,
+                "duration": duration
             })
         
         # 注册回调
