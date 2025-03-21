@@ -43,8 +43,8 @@ TEXT_COLOR = "#333333"  # 默认文字颜色
 HIGHLIGHT_COLOR = "#FFFF00"  # 高亮颜色（黄色）
 
 # 视频配置
-VIDEO_WIDTH = 1080  # 视频宽度
-VIDEO_HEIGHT = 1920  # 视频高度（竖屏，适合手机观看）
+VIDEO_WIDTH = 1920 # 视频宽度
+VIDEO_HEIGHT = 1080  # 视频高度
 VIDEO_FPS = 30  # 视频帧率
 VIDEO_FORMAT = "mp4"  # 视频格式
 SPEED_FACTOR = 2.0  # 录制加速倍率
