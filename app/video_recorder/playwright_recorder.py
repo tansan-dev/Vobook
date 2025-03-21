@@ -65,21 +65,23 @@ class PlaywrightRecorder:
             return str(video_path)
         
         try:
+            # 创建临时视频路径
+            video_path_tmp = tempfile.mktemp(suffix=".webm")
+            video_dir_tmp = os.path.dirname(video_path_tmp)
+            
             # 启动Playwright
             async with async_playwright() as p:
                 # 启动浏览器
                 browser = await p.chromium.launch(headless=True)
                 
-                # 创建上下文
+                # 创建上下文，在这里配置视频录制
                 context = await browser.new_context(
-                    viewport={"width": VIDEO_WIDTH, "height": VIDEO_HEIGHT}
+                    viewport={"width": VIDEO_WIDTH, "height": VIDEO_HEIGHT},
+                    record_video_dir=video_dir_tmp,
+                    record_video_size={"width": VIDEO_WIDTH, "height": VIDEO_HEIGHT}
                 )
                 
-                # 创建页面
-                page = await context.new_page()
-                
-                # 设置录制选项
-                video_path_tmp = tempfile.mktemp(suffix=".webm")
+                # 开始跟踪（可选）
                 await context.tracing.start(
                     screenshots=True,
                     snapshots=True,
@@ -87,13 +89,8 @@ class PlaywrightRecorder:
                     title="Audiobook Recording"
                 )
                 
-                # 启动视频录制
-                await page.video.start(
-                    path=video_path_tmp,
-                    width=VIDEO_WIDTH,
-                    height=VIDEO_HEIGHT,
-                    fps=VIDEO_FPS
-                )
+                # 创建页面
+                page = await context.new_page()
                 
                 # 打开HTML文件
                 file_url = f"file://{html_path}"
@@ -135,46 +132,98 @@ class PlaywrightRecorder:
                 except asyncio.TimeoutError:
                     logger.warning(f"播放超时，强制结束: {paragraph_id}")
                 
-                # 停止录制
-                await page.video.stop()
+                # 获取视频路径 - 正确的方式
+                recorded_video_path = None
+                try:
+                    # 注意：在某些版本中，需要访问page.video，然后调用await video.path()
+                    recorded_video_path = await page.video.path()
+                except Exception as e:
+                    logger.warning(f"获取视频路径失败: {e}")
+                    
+                # 停止跟踪
                 await context.tracing.stop(path=f"{self.video_dir}/trace_{paragraph_id}.zip")
                 
-                # 关闭浏览器
+                # 关闭上下文和浏览器 
+                await context.close()
                 await browser.close()
                 
-                # 将webm转换为mp4，并应用加速因子的逆操作以恢复正常速度
-                speed_factor_inverse = 1.0 / SPEED_FACTOR
-                logger.info(f"正在处理视频，减速至原始速度: {speed_factor_inverse}")
-                
-                # 使用ffmpeg处理视频
-                ffmpeg_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", video_path_tmp,
-                    "-filter:v", f"setpts={speed_factor_inverse}*PTS",
-                    "-c:v", "libx264",
-                    "-preset", "medium",
-                    "-crf", "23",
-                    str(video_path)
-                ]
-                
-                process = subprocess.run(
-                    ffmpeg_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                
-                if process.returncode != 0:
-                    logger.error(f"视频处理失败: {process.stderr.decode()}")
-                    return ""
-                
-                # 清理临时文件
-                try:
-                    os.remove(video_path_tmp)
-                except:
-                    pass
-                
-                logger.info(f"视频录制成功: {video_path}")
-                return str(video_path)
+                # 处理录制的视频
+                if recorded_video_path and os.path.exists(recorded_video_path):
+                    # 使用ffmpeg处理视频，减速至原始速度
+                    speed_factor_inverse = 1.0 / SPEED_FACTOR
+                    logger.info(f"正在处理视频，减速至原始速度: {speed_factor_inverse}")
+                    
+                    ffmpeg_cmd = [
+                        "ffmpeg", "-y",
+                        "-i", recorded_video_path,
+                        "-filter:v", f"setpts={speed_factor_inverse}*PTS",
+                        "-c:v", "libx264",
+                        "-preset", "medium",
+                        "-crf", "23",
+                        str(video_path)
+                    ]
+                    
+                    process = subprocess.run(
+                        ffmpeg_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    
+                    if process.returncode != 0:
+                        logger.error(f"视频处理失败: {process.stderr.decode()}")
+                        return ""
+                    
+                    # 清理临时文件
+                    try:
+                        os.remove(recorded_video_path)
+                    except:
+                        pass
+                    
+                    logger.info(f"视频录制成功: {video_path}")
+                    return str(video_path)
+                else:
+                    # 如果没有获取到视频路径，尝试从目录中查找
+                    video_files = [f for f in os.listdir(video_dir_tmp) 
+                                if f.endswith('.webm') and os.path.isfile(os.path.join(video_dir_tmp, f))]
+                    
+                    if video_files:
+                        recorded_video = os.path.join(video_dir_tmp, video_files[0])
+                        
+                        # 使用ffmpeg处理视频
+                        speed_factor_inverse = 1.0 / SPEED_FACTOR
+                        logger.info(f"正在处理查找到的视频，减速至原始速度: {speed_factor_inverse}")
+                        
+                        ffmpeg_cmd = [
+                            "ffmpeg", "-y",
+                            "-i", recorded_video,
+                            "-filter:v", f"setpts={speed_factor_inverse}*PTS",
+                            "-c:v", "libx264",
+                            "-preset", "medium",
+                            "-crf", "23",
+                            str(video_path)
+                        ]
+                        
+                        process = subprocess.run(
+                            ffmpeg_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
+                        
+                        if process.returncode != 0:
+                            logger.error(f"视频处理失败: {process.stderr.decode()}")
+                            return ""
+                        
+                        # 清理临时文件
+                        try:
+                            os.remove(recorded_video)
+                        except:
+                            pass
+                        
+                        logger.info(f"视频录制成功: {video_path}")
+                        return str(video_path)
+                    else:
+                        logger.error("未找到录制的视频文件")
+                        return ""
         
         except Exception as e:
             logger.error(f"视频录制失败: {e}")
